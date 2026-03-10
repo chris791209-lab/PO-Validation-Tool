@@ -75,7 +75,7 @@ def process_products(files):
 # 2. 建立 Streamlit 網頁介面
 # ==========================================
 st.set_page_config(page_title="訂單自動核對系統", layout="wide")
-st.title("🎃 Halloween 訂單自動核對系統")
+st.title("訂單自動核對系統")
 st.markdown("只需上傳客人的 **PO 原始資料** 與 **產品資料總表**，系統會自動展開混裝箱(Assortment)並進行核對。")
 
 # 側邊欄：檔案上傳區
@@ -154,4 +154,5 @@ if po_file and product_files:
                 mime='text/csv',
             )
 else:
+
     st.info("請先在左側欄上傳 **PO原始資料** 以及至少一份 **產品資料表**。")
