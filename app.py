@@ -10,7 +10,7 @@ def process_po(df):
     """處理訂單(PO)原始資料，生成最終核對用的 DPCI 與數量，並過濾無效資料"""
     df.columns = df.columns.str.strip()
     
-    # 確保 PO NUMBER 是字串，並且只保留「純數字」的資料列 (忽略底部的 Exported at 資訊)
+    # 確保 PO NUMBER 是字串，並且只保留「純數字」的資料列
     df = df[df['PO NUMBER'].astype(str).str.match(r'^\d+$', na=False)].copy()
     
     df['ASSORTMENT ITEM?'] = df['ASSORTMENT ITEM?'].fillna('N').astype(str).str.strip().str.upper()
@@ -20,17 +20,14 @@ def process_po(df):
         if col in df.columns:
             df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 
-    # 建立母單號 (Original_DPCI)
+    # 建立母單號與子單號
     df['Original_DPCI'] = df['DEPARTMENT'].str.zfill(3) + "-" + df['CLASS'].str.zfill(2) + "-" + df['ITEM'].str.zfill(4)
-    
-    # 建立子單號 (Final_DPCI)：若是混裝品抓 COMPONENT，否則抓母單號
     df['Final_DPCI'] = np.where(
         df['ASSORTMENT ITEM?'] == 'Y',
         df['COMPONENT DEPARTMENT'].str.zfill(3) + "-" + df['COMPONENT CLASS'].str.zfill(2) + "-" + df['COMPONENT ITEM'].str.zfill(4),
         df['Original_DPCI']
     )
 
-    # 抓取最終數量 (子單號數量)
     qty_series = np.where(
         df['ASSORTMENT ITEM?'] == 'Y',
         df['COMPONENT ITEM TOTAL QTY'],
@@ -41,8 +38,6 @@ def process_po(df):
     df['ITEM UNIT COST'] = pd.to_numeric(df['ITEM UNIT COST'], errors='coerce')
     df['ITEM UNIT RETAIL'] = pd.to_numeric(df['ITEM UNIT RETAIL'], errors='coerce')
     df['VCP QUANTITY'] = pd.to_numeric(df['VCP QUANTITY'], errors='coerce')
-    
-    # 【新增】將子零件分配數量轉為數字以利核對
     df['COMPONENT ASSORT QTY'] = pd.to_numeric(df['COMPONENT ASSORT QTY'], errors='coerce')
     
     return df
@@ -67,7 +62,7 @@ def process_products(files):
         if col in master_product_df.columns:
             master_product_df[col] = pd.to_numeric(master_product_df[col], errors='coerce')
             
-    # 解決 FCA 與 FOB 雙欄位問題：優先取 FCA，若無則取 FOB
+    # 解決 FCA 與 FOB 雙欄位問題
     if 'FCA Factory City Unit Cost' in master_product_df.columns and 'FOB Unit Cost' in master_product_df.columns:
         master_product_df['Final_Product_Cost'] = master_product_df['FCA Factory City Unit Cost'].fillna(master_product_df['FOB Unit Cost'])
     elif 'FCA Factory City Unit Cost' in master_product_df.columns:
@@ -80,51 +75,57 @@ def process_products(files):
     return master_product_df
 
 def process_assortments(files):
-    """【升級】動態讀取標題，並向下填補母單號與價格，以獲取子單號的分配數量"""
+    """【終極升級】掃描 Excel 的「所有分頁」，確保抓到混裝表資料"""
     df_list = []
     for f in files:
-        raw_df = pd.read_csv(f, header=None) if f.name.endswith('.csv') else pd.read_excel(f, header=None)
-        
-        header_idx = -1
-        for i, row in raw_df.iterrows():
-            if row.astype(str).str.contains('Assortment DPCI', case=False, na=False).any():
-                header_idx = i
-                break
-                
-        if header_idx != -1:
-            df = raw_df.copy()
-            df.columns = df.iloc[header_idx]
-            df.columns = df.columns.astype(str).str.strip()
-            df = df.iloc[header_idx + 1:].reset_index(drop=True)
+        if f.name.endswith('.csv'):
+            raw_dfs = [pd.read_csv(f, header=None)]
+        else:
+            # 讀取 Excel 的所有分頁 (Sheet)
+            xl = pd.ExcelFile(f)
+            raw_dfs = [xl.parse(sheet_name, header=None) for sheet_name in xl.sheet_names]
             
-            master_dpci_col = 'Assortment DPCI' if 'Assortment DPCI' in df.columns else None
-            sub_dpci_col = 'Component Item DPCI' if 'Component Item DPCI' in df.columns else 'Item DPCI' if 'Item DPCI' in df.columns else None
-            cost_col = 'Asst Cost' if 'Asst Cost' in df.columns else 'FA box cost' if 'FA box cost' in df.columns else None
-            units_col = 'Units in Assortment' if 'Units in Assortment' in df.columns else None
-            
-            if master_dpci_col and sub_dpci_col and cost_col and units_col:
-                temp_df = df[[master_dpci_col, sub_dpci_col, cost_col, units_col]].copy()
-                temp_df.columns = ['Assortment_DPCI', 'Component_DPCI', 'Asst_Box_Cost', 'Units_in_Assortment']
+        # 尋找哪一個分頁有資料
+        for raw_df in raw_dfs:
+            header_idx = -1
+            for i, row in raw_df.iterrows():
+                if row.astype(str).str.contains('Assortment DPCI', case=False, na=False).any():
+                    header_idx = i
+                    break
+                    
+            if header_idx != -1:
+                df = raw_df.copy()
+                df.columns = df.iloc[header_idx]
+                df.columns = df.columns.astype(str).str.strip()
+                df = df.iloc[header_idx + 1:].reset_index(drop=True)
                 
-                # 【重要】：向下填補母單號與總價，因為 Excel 中經常留白
-                temp_df['Assortment_DPCI'] = temp_df['Assortment_DPCI'].replace(r'^\s*$', np.nan, regex=True).ffill()
-                temp_df['Asst_Box_Cost'] = temp_df['Asst_Box_Cost'].replace(r'^\s*$', np.nan, regex=True).ffill()
+                master_dpci_col = 'Assortment DPCI' if 'Assortment DPCI' in df.columns else None
+                sub_dpci_col = 'Component Item DPCI' if 'Component Item DPCI' in df.columns else 'Item DPCI' if 'Item DPCI' in df.columns else None
+                cost_col = 'Asst Cost' if 'Asst Cost' in df.columns else 'FA box cost' if 'FA box cost' in df.columns else None
+                units_col = 'Units in Assortment' if 'Units in Assortment' in df.columns else None
                 
-                # 清除沒有子單號的空列
-                temp_df = temp_df.dropna(subset=['Assortment_DPCI', 'Component_DPCI'])
-                temp_df['Assortment_DPCI'] = temp_df['Assortment_DPCI'].astype(str).str.strip()
-                temp_df['Component_DPCI'] = temp_df['Component_DPCI'].astype(str).str.strip()
-                
-                # 過濾掉範本中的解說文字
-                temp_df = temp_df[~temp_df['Assortment_DPCI'].str.contains('IA fills out', case=False, na=False)]
-                
-                temp_df['Asst_Box_Cost'] = pd.to_numeric(temp_df['Asst_Box_Cost'], errors='coerce')
-                temp_df['Units_in_Assortment'] = pd.to_numeric(temp_df['Units_in_Assortment'], errors='coerce')
-                df_list.append(temp_df)
+                if master_dpci_col and sub_dpci_col and cost_col and units_col:
+                    temp_df = df[[master_dpci_col, sub_dpci_col, cost_col, units_col]].copy()
+                    temp_df.columns = ['Assortment_DPCI', 'Component_DPCI', 'Asst_Box_Cost', 'Units_in_Assortment']
+                    
+                    # 向下填補母單號與總價
+                    temp_df['Assortment_DPCI'] = temp_df['Assortment_DPCI'].replace(r'^\s*$', np.nan, regex=True).ffill()
+                    temp_df['Asst_Box_Cost'] = temp_df['Asst_Box_Cost'].replace(r'^\s*$', np.nan, regex=True).ffill()
+                    
+                    # 清除沒有子單號的空列
+                    temp_df = temp_df.dropna(subset=['Assortment_DPCI', 'Component_DPCI'])
+                    temp_df['Assortment_DPCI'] = temp_df['Assortment_DPCI'].astype(str).str.strip()
+                    temp_df['Component_DPCI'] = temp_df['Component_DPCI'].astype(str).str.strip()
+                    
+                    # 過濾掉範本中的解說文字
+                    temp_df = temp_df[~temp_df['Assortment_DPCI'].str.contains('IA fills out', case=False, na=False)]
+                    
+                    temp_df['Asst_Box_Cost'] = pd.to_numeric(temp_df['Asst_Box_Cost'], errors='coerce')
+                    temp_df['Units_in_Assortment'] = pd.to_numeric(temp_df['Units_in_Assortment'], errors='coerce')
+                    df_list.append(temp_df)
                 
     if df_list:
         master_asst = pd.concat(df_list, ignore_index=True)
-        # 去除重複時，確保母單號與子單號的組合是唯一的
         return master_asst.drop_duplicates(subset=['Assortment_DPCI', 'Component_DPCI'])
     return pd.DataFrame(columns=['Assortment_DPCI', 'Component_DPCI', 'Asst_Box_Cost', 'Units_in_Assortment'])
 
@@ -155,7 +156,6 @@ if po_file and product_files:
             # 2. 拿母單號+子單號與混裝表 Merge
             if asst_files:
                 asst_df = process_assortments(asst_files)
-                # 【優化】利用母單號 AND 子單號同時對應，以精準抓出混裝表內的 Units_in_Assortment
                 merged_df = pd.merge(merged_df, asst_df, 
                                      left_on=['Original_DPCI', 'Final_DPCI'], 
                                      right_on=['Assortment_DPCI', 'Component_DPCI'], 
@@ -173,8 +173,10 @@ if po_file and product_files:
             # 3. 執行檢驗邏輯
             # ==========================================
             # (1) 成本比對
-            merged_df['Cost Match'] = np.isclose(merged_df['ITEM UNIT COST'].fillna(0), merged_df['Target_Cost'].fillna(0), atol=0.01)
-            
+            merged_df['Cost Match'] = np.isclose(merged_df['ITEM UNIT COST'].fillna(-1), merged_df['Target_Cost'].fillna(-1), atol=0.01)
+            # 若為 -1 代表空值，此時判定為 False
+            merged_df['Cost Match'] = np.where(merged_df['Target_Cost'].isna(), False, merged_df['Cost Match'])
+
             # (2) 零售價比對：如果是混裝品 (Y)，直接標記為 True；否則正常比對
             merged_df['Retail Match'] = np.where(
                 merged_df['ASSORTMENT ITEM?'] == 'Y',
@@ -183,22 +185,22 @@ if po_file and product_files:
             )
             
             # (3) 裝箱數比對：動態切換核對欄位
-            # 設定標準值：混裝品看提案表的分配數，一般品看主檔裝箱數
             merged_df['Target Case / Assort QTY'] = np.where(
                 merged_df['ASSORTMENT ITEM?'] == 'Y',
                 merged_df.get('Units_in_Assortment', pd.Series(np.nan)),
                 merged_df.get('Case Unit Quantity', pd.Series(np.nan))
             )
             
-            # 設定被檢驗值：混裝品看 PO 上的 COMPONENT ASSORT QTY，一般品看 VCP QUANTITY
             merged_df['PO VCP / Assort QTY'] = np.where(
                 merged_df['ASSORTMENT ITEM?'] == 'Y',
                 merged_df['COMPONENT ASSORT QTY'],
                 merged_df['VCP QUANTITY']
             )
 
-            # 進行對比
-            merged_df['Case QTY Match'] = merged_df['PO VCP / Assort QTY'] == merged_df['Target Case / Assort QTY']
+            # 進行對比 (修正浮點數可能產生的誤判)
+            merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
+            # 若右側為空值，則視為錯誤
+            merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
             
             # 總覽判定
             merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match']
