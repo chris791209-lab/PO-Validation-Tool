@@ -134,7 +134,7 @@ if po_file and product_files:
             
             st.subheader("⚠️ 異常資料列表 (有不一致的項目)")
             if len(errors_df) > 0:
-                st.dataframe(errors_df.style.highlight_max(axis=0))
+                st.dataframe(errors_df)
             else:
                 st.info("太棒了！所有資料皆一致，沒有異常。")
                 
@@ -156,3 +156,4 @@ if po_file and product_files:
 else:
 
     st.info("請先在左側欄上傳 **PO原始資料** 以及至少一份 **產品資料表**。")
+
