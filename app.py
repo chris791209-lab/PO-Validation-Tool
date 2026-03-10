@@ -98,7 +98,7 @@ def process_assortments(files):
 # 2. 建立 Streamlit 網頁介面
 # ==========================================
 st.set_page_config(page_title="訂單自動核對系統", layout="wide")
-st.title("🎃 Halloween 訂單自動核對系統 (優化版)")
+st.title("Halloween 訂單自動核對系統")
 
 # 側邊欄：檔案上傳區
 st.sidebar.header("📂 檔案上傳區")
@@ -185,3 +185,4 @@ if po_file and product_files:
             )
 else:
     st.info("請先在左側欄上傳 **PO原始資料** 以及至少一份 **產品資料表**。")
+
