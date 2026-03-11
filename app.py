@@ -153,7 +153,7 @@ def process_assortments(files):
 # 3. 建立 Streamlit 網頁介面
 # ==========================================
 st.set_page_config(page_title="訂單自動核對系統", layout="wide")
-st.title("📦 跨專案訂單自動核對系統 (防呆升級版)")
+st.title("📦D240訂單自動核對系統")
 
 st.sidebar.header("📂 檔案上傳區")
 po_file = st.sidebar.file_uploader("1. 上傳 PO 原始資料 (CSV)", type=['csv'])
@@ -262,3 +262,4 @@ if po_file and product_files:
             )
 else:
     st.info("請先在左側欄上傳 **PO原始資料** 以及至少一份 **產品資料表**。")
+
