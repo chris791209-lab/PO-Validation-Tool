@@ -4,7 +4,23 @@ import numpy as np
 import io
 
 # ==========================================
-# 1. 定義資料處理函數
+# 1. 共通 DPCI 清理函數 (核彈級清理，確保全專案適用)
+# ==========================================
+def clean_dpci(series):
+    """清理 DPCI 字串，強制移除所有空白、斜線與隱藏字元"""
+    if series is None:
+        return series
+    cleaned = series.astype(str)
+    # 移除所有空白字元 (包含半形、全形、\t, \n, \r 等)
+    cleaned = cleaned.str.replace(r'\s+', '', regex=True)
+    # 將斜線 (/) 或反斜線 (\) 替換為標準中線 (-)
+    cleaned = cleaned.str.replace(r'[/\\]', '-', regex=True)
+    # 移除可能殘留的 .0 (防範數字被轉成浮點數)
+    cleaned = cleaned.str.replace(r'\.0$', '', regex=True)
+    return cleaned
+
+# ==========================================
+# 2. 定義資料處理函數
 # ==========================================
 def process_po(df):
     """處理訂單(PO)原始資料，生成最終核對用的 DPCI 與數量，並過濾無效資料"""
@@ -20,11 +36,12 @@ def process_po(df):
         if col in df.columns:
             df[col] = df[col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 
-    # 建立母單號與子單號
-    df['Original_DPCI'] = df['DEPARTMENT'].str.zfill(3) + "-" + df['CLASS'].str.zfill(2) + "-" + df['ITEM'].str.zfill(4)
+    # 建立母單號與子單號 (強制套用 clean_dpci 確保完全乾淨)
+    df['Original_DPCI'] = clean_dpci(df['DEPARTMENT'].str.zfill(3) + "-" + df['CLASS'].str.zfill(2) + "-" + df['ITEM'].str.zfill(4))
+    
     df['Final_DPCI'] = np.where(
         df['ASSORTMENT ITEM?'] == 'Y',
-        df['COMPONENT DEPARTMENT'].str.zfill(3) + "-" + df['COMPONENT CLASS'].str.zfill(2) + "-" + df['COMPONENT ITEM'].str.zfill(4),
+        clean_dpci(df['COMPONENT DEPARTMENT'].str.zfill(3) + "-" + df['COMPONENT CLASS'].str.zfill(2) + "-" + df['COMPONENT ITEM'].str.zfill(4)),
         df['Original_DPCI']
     )
 
@@ -55,14 +72,13 @@ def process_products(files):
     master_product_df = pd.concat(df_list, ignore_index=True)
     
     if 'DPCI' in master_product_df.columns:
-        master_product_df['DPCI'] = master_product_df['DPCI'].astype(str).str.strip()
+        master_product_df['DPCI'] = clean_dpci(master_product_df['DPCI'])
     
     numeric_cols = ['FCA Factory City Unit Cost', 'FOB Unit Cost', 'Suggested Unit Retail', 'Case Unit Quantity']
     for col in numeric_cols:
         if col in master_product_df.columns:
             master_product_df[col] = pd.to_numeric(master_product_df[col], errors='coerce')
             
-    # 解決 FCA 與 FOB 雙欄位問題
     if 'FCA Factory City Unit Cost' in master_product_df.columns and 'FOB Unit Cost' in master_product_df.columns:
         master_product_df['Final_Product_Cost'] = master_product_df['FCA Factory City Unit Cost'].fillna(master_product_df['FOB Unit Cost'])
     elif 'FCA Factory City Unit Cost' in master_product_df.columns:
@@ -75,34 +91,36 @@ def process_products(files):
     return master_product_df
 
 def process_assortments(files):
-    """【終極升級】掃描 Excel 的「所有分頁」，確保抓到混裝表資料"""
+    """掃描 Excel 所有分頁，並透過智慧模糊比對抓取欄位"""
     df_list = []
     for f in files:
         if f.name.endswith('.csv'):
             raw_dfs = [pd.read_csv(f, header=None)]
         else:
-            # 讀取 Excel 的所有分頁 (Sheet)
             xl = pd.ExcelFile(f)
             raw_dfs = [xl.parse(sheet_name, header=None) for sheet_name in xl.sheet_names]
             
-        # 尋找哪一個分頁有資料
         for raw_df in raw_dfs:
             header_idx = -1
+            # 智慧尋找標題列 (忽略大小寫與空白)
             for i, row in raw_df.iterrows():
-                if row.astype(str).str.contains('Assortment DPCI', case=False, na=False).any():
+                row_str = row.astype(str).str.replace(r'\s+', '', regex=True).str.lower()
+                if row_str.str.contains('assortmentdpci', na=False).any():
                     header_idx = i
                     break
                     
             if header_idx != -1:
                 df = raw_df.copy()
                 df.columns = df.iloc[header_idx]
-                df.columns = df.columns.astype(str).str.strip()
+                # 清理欄位名稱中的換行符號與空白，以利後續智慧判斷
+                df.columns = df.columns.astype(str).str.replace(r'[\n\r]', ' ', regex=True).str.strip()
                 df = df.iloc[header_idx + 1:].reset_index(drop=True)
                 
-                master_dpci_col = 'Assortment DPCI' if 'Assortment DPCI' in df.columns else None
-                sub_dpci_col = 'Component Item DPCI' if 'Component Item DPCI' in df.columns else 'Item DPCI' if 'Item DPCI' in df.columns else None
-                cost_col = 'Asst Cost' if 'Asst Cost' in df.columns else 'FA box cost' if 'FA box cost' in df.columns else None
-                units_col = 'Units in Assortment' if 'Units in Assortment' in df.columns else None
+                # 智慧比對欄位名稱 (防範業務打錯字或多打空格)
+                master_dpci_col = next((c for c in df.columns if 'assortment dpci' in c.lower() or 'assortmentdpci' in c.replace(' ', '').lower()), None)
+                sub_dpci_col = next((c for c in df.columns if 'component item dpci' in c.lower() or 'item dpci' in c.lower()), None)
+                cost_col = next((c for c in df.columns if 'asst cost' in c.lower() or 'fa box cost' in c.lower()), None)
+                units_col = next((c for c in df.columns if 'units in assortment' in c.lower()), None)
                 
                 if master_dpci_col and sub_dpci_col and cost_col and units_col:
                     temp_df = df[[master_dpci_col, sub_dpci_col, cost_col, units_col]].copy()
@@ -112,13 +130,15 @@ def process_assortments(files):
                     temp_df['Assortment_DPCI'] = temp_df['Assortment_DPCI'].replace(r'^\s*$', np.nan, regex=True).ffill()
                     temp_df['Asst_Box_Cost'] = temp_df['Asst_Box_Cost'].replace(r'^\s*$', np.nan, regex=True).ffill()
                     
-                    # 清除沒有子單號的空列
+                    # 丟棄沒有子單號的空列
                     temp_df = temp_df.dropna(subset=['Assortment_DPCI', 'Component_DPCI'])
-                    temp_df['Assortment_DPCI'] = temp_df['Assortment_DPCI'].astype(str).str.strip()
-                    temp_df['Component_DPCI'] = temp_df['Component_DPCI'].astype(str).str.strip()
                     
-                    # 過濾掉範本中的解說文字
-                    temp_df = temp_df[~temp_df['Assortment_DPCI'].str.contains('IA fills out', case=False, na=False)]
+                    # 強制套用 DPCI 消毒清理過濾器
+                    temp_df['Assortment_DPCI'] = clean_dpci(temp_df['Assortment_DPCI'])
+                    temp_df['Component_DPCI'] = clean_dpci(temp_df['Component_DPCI'])
+                    
+                    # 過濾掉範本解說文字 (忽略大小寫與空白)
+                    temp_df = temp_df[~temp_df['Assortment_DPCI'].str.lower().str.contains('iafillsout|nan|none', na=False)]
                     
                     temp_df['Asst_Box_Cost'] = pd.to_numeric(temp_df['Asst_Box_Cost'], errors='coerce')
                     temp_df['Units_in_Assortment'] = pd.to_numeric(temp_df['Units_in_Assortment'], errors='coerce')
@@ -130,10 +150,10 @@ def process_assortments(files):
     return pd.DataFrame(columns=['Assortment_DPCI', 'Component_DPCI', 'Asst_Box_Cost', 'Units_in_Assortment'])
 
 # ==========================================
-# 2. 建立 Streamlit 網頁介面
+# 3. 建立 Streamlit 網頁介面
 # ==========================================
 st.set_page_config(page_title="訂單自動核對系統", layout="wide")
-st.title("訂單自動核對系統")
+st.title("📦 跨專案訂單自動核對系統 (防呆升級版)")
 
 st.sidebar.header("📂 檔案上傳區")
 po_file = st.sidebar.file_uploader("1. 上傳 PO 原始資料 (CSV)", type=['csv'])
@@ -142,7 +162,7 @@ asst_files = st.sidebar.file_uploader("3. 上傳混裝箱 Assortment 表單 (可
 
 if po_file and product_files:
     if st.button("🚀 開始核對訂單", type="primary"):
-        with st.spinner("資料處理中，請稍候..."):
+        with st.spinner("資料清洗與比對中，請稍候..."):
             
             po_df = process_po(pd.read_csv(po_file))
             prod_df = process_products(product_files)
@@ -170,11 +190,10 @@ if po_file and product_files:
                 merged_df['Target_Cost'] = merged_df['Final_Product_Cost']
 
             # ==========================================
-            # 3. 執行檢驗邏輯
+            # 4. 執行檢驗邏輯
             # ==========================================
             # (1) 成本比對
             merged_df['Cost Match'] = np.isclose(merged_df['ITEM UNIT COST'].fillna(-1), merged_df['Target_Cost'].fillna(-1), atol=0.01)
-            # 若為 -1 代表空值，此時判定為 False
             merged_df['Cost Match'] = np.where(merged_df['Target_Cost'].isna(), False, merged_df['Cost Match'])
 
             # (2) 零售價比對：如果是混裝品 (Y)，直接標記為 True；否則正常比對
@@ -197,9 +216,8 @@ if po_file and product_files:
                 merged_df['VCP QUANTITY']
             )
 
-            # 進行對比 (修正浮點數可能產生的誤判)
+            # 進行對比
             merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
-            # 若右側為空值，則視為錯誤
             merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
             
             # 總覽判定
@@ -216,7 +234,7 @@ if po_file and product_files:
             result_df = merged_df[display_cols]
 
             # ==========================================
-            # 4. 顯示結果並提供下載
+            # 5. 顯示結果並提供下載
             # ==========================================
             errors_df = result_df[result_df['All Match (Pass)'] == False]
             
@@ -239,7 +257,7 @@ if po_file and product_files:
             st.download_button(
                 label="📥 下載完整核對報告 (CSV)",
                 data=csv_data,
-                file_name='PO_Validation_Final.csv',
+                file_name='PO_Validation_Universal.csv',
                 mime='text/csv',
             )
 else:
