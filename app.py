@@ -9,7 +9,6 @@ import io
 def check_password():
     """回傳 True 代表使用者輸入了正確的密碼"""
     def password_entered():
-        """檢查使用者輸入的密碼是否與 Streamlit Secrets 中的密碼相符"""
         if st.session_state["password"] == st.secrets["app_password"]:
             st.session_state["password_correct"] = True
             del st.session_state["password"]  
@@ -37,7 +36,6 @@ def check_password():
     else:
         return True
 
-# 檢查密碼，若未通過則停止執行後續網頁內容
 if not check_password():
     st.stop()
 
@@ -95,7 +93,8 @@ def process_modern_po(df):
         
     df = df[df['PO #'].astype(str).str.match(r'^\d+$', na=False)].copy()
     
-    for col in ['ORIGINAL QUANTITY', 'COST $', 'RETAIL $', 'VCP QUANTITY']:
+    # 【新增】將 REVISED QUANTITY 也納入數字清理轉換
+    for col in ['ORIGINAL QUANTITY', 'REVISED QUANTITY', 'COST $', 'RETAIL $', 'VCP QUANTITY']:
         if col in df.columns:
             df[col] = df[col].astype(str).str.replace(',', '', regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -122,7 +121,9 @@ def process_products(files):
     if 'DPCI' in master_product_df.columns:
         master_product_df['DPCI'] = clean_dpci(master_product_df['DPCI'])
     
-    for col in ['FCA Factory City Unit Cost', 'FOB Unit Cost', 'Suggested Unit Retail', 'Case Unit Quantity']:
+    # 【新增】將 Ent Ttl Rcpt U 納入數值讀取欄位
+    numeric_cols = ['FCA Factory City Unit Cost', 'FOB Unit Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U']
+    for col in numeric_cols:
         if col in master_product_df.columns:
             master_product_df[col] = pd.to_numeric(master_product_df[col], errors='coerce')
             
@@ -171,17 +172,15 @@ def process_assortments(files):
     return pd.DataFrame(columns=['Assortment_DPCI', 'Component_DPCI', 'Asst_Box_Cost', 'Units_in_Assortment'])
 
 # ==========================================
-# 3. 建立 Streamlit 網頁介面 (分頁架構)
+# 3. 建立 Streamlit 網頁介面
 # ==========================================
 st.set_page_config(page_title="訂單自動核對系統", layout="wide")
 st.title("📦 跨專案訂單自動核對系統")
 
-# 左側邊欄：統一放置「共通資料庫」(無論哪種 PO 格式都會用到)
 st.sidebar.header("📂 步驟 1：上傳共通資料庫")
 product_files = st.sidebar.file_uploader("上傳 產品資料表 (可多選)", type=['csv', 'xlsx'], accept_multiple_files=True)
 asst_files = st.sidebar.file_uploader("上傳 混裝箱表單 (可多選/選填)", type=['csv', 'xlsx'], accept_multiple_files=True)
 
-# 建立分頁介面
 tab1, tab2 = st.tabs(["📊 標準版 (Standard PO) 核對", "📈 現代版 (Modern PO) 核對"])
 
 # ----------------- 分頁 1: 標準版 -----------------
@@ -197,7 +196,8 @@ with tab1:
                 po_df = process_standard_po(pd.read_csv(po_file_std))
                 prod_df = process_products(product_files)
                 
-                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
+                # 【新增】抓取 Ent Ttl Rcpt U 欄位
+                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
                 merged_df = pd.merge(po_df, prod_subset, left_on='Final_DPCI', right_on='DPCI', how='left')
 
                 if asst_files:
@@ -207,22 +207,36 @@ with tab1:
                 else:
                     merged_df['Target_Cost'] = merged_df['Final_Product_Cost']
 
-                # 核對邏輯
+                # (1) 成本比對
                 merged_df['Cost Match'] = np.isclose(merged_df['ITEM UNIT COST'].fillna(-1), merged_df['Target_Cost'].fillna(-1), atol=0.01)
                 merged_df['Cost Match'] = np.where(merged_df['Target_Cost'].isna(), False, merged_df['Cost Match'])
 
+                # (2) 零售價比對
                 merged_df['Retail Match'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', True, np.isclose(merged_df['ITEM UNIT RETAIL'].fillna(0), merged_df.get('Suggested Unit Retail', pd.Series(np.nan)).fillna(0), atol=0.01))
                 
+                # (3) 裝箱數比對
                 merged_df['Target Case / Assort QTY'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', merged_df.get('Units_in_Assortment', pd.Series(np.nan)), merged_df.get('Case Unit Quantity', pd.Series(np.nan)))
                 merged_df['PO VCP / Assort QTY'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', merged_df['COMPONENT ASSORT QTY'], merged_df['VCP QUANTITY'])
-
                 merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 
-                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match']
+                # 【新增】(4) 總數量比對 (標準版使用 Final_QTY 也就是 TOTAL ITEM QTY/COMPONENT ITEM TOTAL QTY)
+                merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
+                merged_df['PO Total QTY'] = merged_df['Final_QTY']
+                merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
+                merged_df['Total QTY Match'] = np.where(merged_df['Target Total QTY'].isna(), False, merged_df['Total QTY Match'])
+                
+                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
                 
                 # 顯示結果
-                display_cols = ['PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 'Final_QTY', 'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 'All Match (Pass)']
+                display_cols = [
+                    'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 
+                    'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
+                    'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
+                    'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
+                    'Total QTY Match', 'PO Total QTY', 'Target Total QTY',
+                    'All Match (Pass)'
+                ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
                 errors_df = result_df[result_df['All Match (Pass)'] == False]
                 
@@ -246,7 +260,8 @@ with tab2:
                 po_df = process_modern_po(pd.read_csv(po_file_mod))
                 prod_df = process_products(product_files)
                 
-                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
+                # 【新增】抓取 Ent Ttl Rcpt U 欄位
+                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
                 merged_df = pd.merge(po_df, prod_subset, left_on='Final_DPCI', right_on='DPCI', how='left')
 
                 if asst_files:
@@ -258,28 +273,39 @@ with tab2:
                 else:
                     merged_df['Target_Cost'] = merged_df['Final_Product_Cost']
 
-                # 核對邏輯
+                # (1) 成本比對
                 merged_df['Cost Match'] = np.isclose(merged_df['ITEM UNIT COST'].fillna(-1), merged_df['Target_Cost'].fillna(-1), atol=0.01)
                 merged_df['Cost Match'] = np.where(merged_df['Target_Cost'].isna(), False, merged_df['Cost Match'])
 
+                # (2) 零售價比對
                 merged_df['Retail Match'] = np.isclose(merged_df['ITEM UNIT RETAIL'].fillna(0), merged_df.get('Suggested Unit Retail', pd.Series(np.nan)).fillna(0), atol=0.01)
                 
+                # (3) 裝箱數比對
                 merged_df['Target Case / Assort QTY'] = merged_df.get('Case Unit Quantity', pd.Series(np.nan))
                 merged_df['PO VCP / Assort QTY'] = merged_df['VCP QUANTITY']
-
-                # 【修正重點】：現代版若是混裝品(Y)，主檔不會有裝箱數，為避免誤判為 False，在此讓目標裝箱數等於 PO 裝箱數，強制通過比對
                 merged_df['Target Case / Assort QTY'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', merged_df['PO VCP / Assort QTY'], merged_df['Target Case / Assort QTY'])
                 
                 merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
-                
-                # 確保混裝品的裝箱數比對強制作為 True 通過
                 merged_df['Case QTY Match'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', True, merged_df['Case QTY Match'])
                 
-                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match']
+                # 【新增】(4) 總數量比對 (現代版特別抓取 REVISED QUANTITY 進行比對)
+                merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
+                merged_df['PO Total QTY'] = merged_df['REVISED QUANTITY']
+                merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
+                merged_df['Total QTY Match'] = np.where(merged_df['Target Total QTY'].isna(), False, merged_df['Total QTY Match'])
+                
+                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
                 
                 # 顯示結果
-                display_cols = ['PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 'Final_QTY', 'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 'All Match (Pass)']
+                display_cols = [
+                    'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 
+                    'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
+                    'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
+                    'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
+                    'Total QTY Match', 'PO Total QTY', 'Target Total QTY',
+                    'All Match (Pass)'
+                ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
                 errors_df = result_df[result_df['All Match (Pass)'] == False]
                 
