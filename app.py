@@ -253,11 +253,11 @@ with tab1:
                 merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 
-                # (4) 總數量比對 (將欄位改名為 Commit Qty)
-                merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
-                merged_df['Commit Qty'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
-                merged_df['Total QTY Match'] = np.isclose(merged_df['Commit Qty'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
-                merged_df['Total QTY Match'] = np.where(merged_df['Target Total QTY'].isna(), False, merged_df['Total QTY Match'])
+                # (4) 總數量比對 (精準命名)
+                merged_df['Target Commit QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
+                merged_df['PO Total QTY'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
+                merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Commit QTY'].fillna(-1), atol=0.01)
+                merged_df['Total QTY Match'] = np.where(merged_df['Target Commit QTY'].isna(), False, merged_df['Total QTY Match'])
                 
                 merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
                 
@@ -267,7 +267,7 @@ with tab1:
                     'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
                     'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
                     'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
-                    'Total QTY Match', 'Commit Qty', 'Target Total QTY',
+                    'Total QTY Match', 'PO Total QTY', 'Target Commit QTY',
                     'All Match (Pass)'
                 ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
@@ -321,11 +321,11 @@ with tab2:
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 merged_df['Case QTY Match'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', True, merged_df['Case QTY Match'])
                 
-                # (4) 總數量比對 (將欄位改名為 Commit Qty)
-                merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
-                merged_df['Commit Qty'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
-                merged_df['Total QTY Match'] = np.isclose(merged_df['Commit Qty'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
-                merged_df['Total QTY Match'] = np.where(merged_df['Target Total QTY'].isna(), False, merged_df['Total QTY Match'])
+                # (4) 總數量比對 (精準命名)
+                merged_df['Target Commit QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
+                merged_df['PO Total QTY'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
+                merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Commit QTY'].fillna(-1), atol=0.01)
+                merged_df['Total QTY Match'] = np.where(merged_df['Target Commit QTY'].isna(), False, merged_df['Total QTY Match'])
                 
                 merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
                 
@@ -335,7 +335,7 @@ with tab2:
                     'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
                     'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
                     'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
-                    'Total QTY Match', 'Commit Qty', 'Target Total QTY',
+                    'Total QTY Match', 'PO Total QTY', 'Target Commit QTY',
                     'All Match (Pass)'
                 ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
