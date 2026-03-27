@@ -68,7 +68,6 @@ def process_standard_po(df):
             st.error("❌ 檔案讀取錯誤：找不到 'PO NUMBER' 欄位！請確認您上傳的是正確的【標準版 PO】檔案。")
         st.stop()
         
-    # 【修復】強制清除結尾的 .0，避免 float 轉換導致資料流失
     df[po_col] = df[po_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     df = df[df[po_col].str.match(r'^\d+$', na=False)].copy()
     
@@ -100,7 +99,6 @@ def process_modern_po(df):
     
     po_col = next((c for c in df.columns if 'PO' in c.upper() and '#' in c.upper()), None)
     
-    # 【修復】動態尋找 COST 與 RETAIL 欄位，相容 (REV COST $, COST $) 等各種變形
     cost_col = next((c for c in df.columns if c.upper() == 'COST $'), None) or \
                next((c for c in df.columns if 'REV COST' in c.upper() and '$' in c.upper()), None) or \
                next((c for c in df.columns if 'COST' in c.upper() and '$' in c.upper()), None)
@@ -116,11 +114,9 @@ def process_modern_po(df):
             st.error("❌ 檔案讀取錯誤：找不到 'PO #' 或 'COST $' 相關欄位！請確認您上傳的是正確的【現代版 PO】檔案。")
         st.stop()
         
-    # 【修復】強制清除結尾的 .0，避免 float 轉換導致資料過濾後歸零
     df[po_col] = df[po_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     df = df[df[po_col].str.match(r'^\d+$', na=False)].copy()
     
-    # 鎖定現代版的原始數量與修改後數量
     orig_qty_col = next((c for c in df.columns if 'ORIGINAL QUANTITY' in c.upper()), None)
     rev_qty_col = next((c for c in df.columns if 'REVISED QUANTITY' in c.upper()), None)
     
@@ -129,11 +125,10 @@ def process_modern_po(df):
             df[col] = df[col].astype(str).str.replace(',', '', regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
-    df['PO NUMBER'] = df[po_col]
+    df['PO NUMBER'] = df[po_col].astype(str)
     df['Original_DPCI'] = clean_dpci(df['DPCI'])
     df['Final_DPCI'] = df['Original_DPCI']
     
-    # 自動用 ORIGINAL QUANTITY 算回單價
     if orig_qty_col and cost_col:
         df['ITEM UNIT COST'] = df[cost_col] / df[orig_qty_col]
     else:
@@ -258,21 +253,21 @@ with tab1:
                 merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 
-                # (4) 總數量比對
+                # (4) 總數量比對 (將欄位改名為 Commit Qty)
                 merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
-                merged_df['PO Total QTY'] = merged_df['Final_QTY']
-                merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
+                merged_df['Commit Qty'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
+                merged_df['Total QTY Match'] = np.isclose(merged_df['Commit Qty'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
                 merged_df['Total QTY Match'] = np.where(merged_df['Target Total QTY'].isna(), False, merged_df['Total QTY Match'])
                 
                 merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
                 
                 # 顯示結果
                 display_cols = [
-                    'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 
+                    'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 'Final_QTY', 
                     'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
                     'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
                     'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
-                    'Total QTY Match', 'PO Total QTY', 'Target Total QTY',
+                    'Total QTY Match', 'Commit Qty', 'Target Total QTY',
                     'All Match (Pass)'
                 ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
@@ -326,21 +321,21 @@ with tab2:
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 merged_df['Case QTY Match'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', True, merged_df['Case QTY Match'])
                 
-                # (4) 總數量比對
+                # (4) 總數量比對 (將欄位改名為 Commit Qty)
                 merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
-                merged_df['PO Total QTY'] = merged_df['REVISED QUANTITY']
-                merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
+                merged_df['Commit Qty'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
+                merged_df['Total QTY Match'] = np.isclose(merged_df['Commit Qty'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
                 merged_df['Total QTY Match'] = np.where(merged_df['Target Total QTY'].isna(), False, merged_df['Total QTY Match'])
                 
                 merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
                 
                 # 顯示結果
                 display_cols = [
-                    'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 
+                    'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 'Final_QTY',
                     'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
                     'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
                     'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
-                    'Total QTY Match', 'PO Total QTY', 'Target Total QTY',
+                    'Total QTY Match', 'Commit Qty', 'Target Total QTY',
                     'All Match (Pass)'
                 ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
