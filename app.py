@@ -57,22 +57,22 @@ def clean_dpci(series):
 # ==========================================
 def process_standard_po(df):
     """處理【標準版】訂單原始資料"""
-    # 清理所有欄位名稱中的隱藏編碼與換行
     df.columns = df.columns.astype(str).str.replace(r'[\ufeff\n\r]', '', regex=True).str.strip()
     
-    # 智慧鎖定 PO NUMBER 欄位
     po_col = next((c for c in df.columns if 'PO NUMBER' in c.upper()), None)
     
     if not po_col:
-        # 如果找不到，檢查是不是使用者傳成了現代版
         if next((c for c in df.columns if 'PO' in c.upper() and '#' in c.upper()), None):
             st.error("❌ 檔案讀取錯誤：您上傳的似乎是【現代版 PO】。請切換到上方的「📈 現代版 (Modern PO)」分頁進行操作！")
         else:
             st.error("❌ 檔案讀取錯誤：找不到 'PO NUMBER' 欄位！請確認您上傳的是正確的【標準版 PO】檔案。")
         st.stop()
         
-    df = df[df[po_col].astype(str).str.match(r'^\d+$', na=False)].copy()
-    df['PO NUMBER'] = df[po_col] # 統一標準化名稱
+    # 【修復】強制清除結尾的 .0，避免 float 轉換導致資料流失
+    df[po_col] = df[po_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df = df[df[po_col].str.match(r'^\d+$', na=False)].copy()
+    
+    df['PO NUMBER'] = df[po_col]
     df['ASSORTMENT ITEM?'] = df['ASSORTMENT ITEM?'].fillna('N').astype(str).str.strip().str.upper()
     
     cols_to_clean = ['DEPARTMENT', 'CLASS', 'ITEM', 'COMPONENT DEPARTMENT', 'COMPONENT CLASS', 'COMPONENT ITEM']
@@ -96,36 +96,56 @@ def process_standard_po(df):
 
 def process_modern_po(df):
     """處理【現代版】訂單原始資料"""
-    # 清理所有欄位名稱中的隱藏編碼與換行
     df.columns = df.columns.astype(str).str.replace(r'[\ufeff\n\r]', '', regex=True).str.strip()
     
-    # 智慧鎖定現代版專屬欄位 (允許大小寫差異與多餘空白)
     po_col = next((c for c in df.columns if 'PO' in c.upper() and '#' in c.upper()), None)
-    cost_col = next((c for c in df.columns if 'COST' in c.upper() and '$' in c.upper()), None)
-    retail_col = next((c for c in df.columns if 'RETAIL' in c.upper() and '$' in c.upper()), None)
+    
+    # 【修復】動態尋找 COST 與 RETAIL 欄位，相容 (REV COST $, COST $) 等各種變形
+    cost_col = next((c for c in df.columns if c.upper() == 'COST $'), None) or \
+               next((c for c in df.columns if 'REV COST' in c.upper() and '$' in c.upper()), None) or \
+               next((c for c in df.columns if 'COST' in c.upper() and '$' in c.upper()), None)
+               
+    retail_col = next((c for c in df.columns if c.upper() == 'RETAIL $'), None) or \
+                 next((c for c in df.columns if 'REV RETAIL' in c.upper() and '$' in c.upper()), None) or \
+                 next((c for c in df.columns if 'RETAIL' in c.upper() and '$' in c.upper()), None)
     
     if not po_col or not cost_col:
-        # 如果找不到，檢查是不是使用者傳成了標準版
         if next((c for c in df.columns if 'PO NUMBER' in c.upper()), None):
             st.error("❌ 檔案讀取錯誤：您上傳的似乎是【標準版 PO】。請切換到上方的「📊 標準版 (Standard PO)」分頁進行操作！")
         else:
-            st.error("❌ 檔案讀取錯誤：找不到 'PO #' 或 'COST $' 欄位！請確認您上傳的是正確的【現代版 PO】檔案。")
+            st.error("❌ 檔案讀取錯誤：找不到 'PO #' 或 'COST $' 相關欄位！請確認您上傳的是正確的【現代版 PO】檔案。")
         st.stop()
         
-    df = df[df[po_col].astype(str).str.match(r'^\d+$', na=False)].copy()
+    # 【修復】強制清除結尾的 .0，避免 float 轉換導致資料過濾後歸零
+    df[po_col] = df[po_col].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df = df[df[po_col].str.match(r'^\d+$', na=False)].copy()
     
-    for col in ['ORIGINAL QUANTITY', 'REVISED QUANTITY', cost_col, retail_col, 'VCP QUANTITY']:
+    # 鎖定現代版的原始數量與修改後數量
+    orig_qty_col = next((c for c in df.columns if 'ORIGINAL QUANTITY' in c.upper()), None)
+    rev_qty_col = next((c for c in df.columns if 'REVISED QUANTITY' in c.upper()), None)
+    
+    for col in [orig_qty_col, rev_qty_col, cost_col, retail_col, 'VCP QUANTITY']:
         if col and col in df.columns:
             df[col] = df[col].astype(str).str.replace(',', '', regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
-    df['PO NUMBER'] = df[po_col].astype(str)
+    df['PO NUMBER'] = df[po_col]
     df['Original_DPCI'] = clean_dpci(df['DPCI'])
     df['Final_DPCI'] = df['Original_DPCI']
-    df['Final_QTY'] = df['ORIGINAL QUANTITY']
     
-    df['ITEM UNIT COST'] = df[cost_col] / df['ORIGINAL QUANTITY']
-    df['ITEM UNIT RETAIL'] = df[retail_col] / df['ORIGINAL QUANTITY']
+    # 自動用 ORIGINAL QUANTITY 算回單價
+    if orig_qty_col and cost_col:
+        df['ITEM UNIT COST'] = df[cost_col] / df[orig_qty_col]
+    else:
+        df['ITEM UNIT COST'] = np.nan
+        
+    if orig_qty_col and retail_col:
+        df['ITEM UNIT RETAIL'] = df[retail_col] / df[orig_qty_col]
+    else:
+        df['ITEM UNIT RETAIL'] = np.nan
+        
+    df['Final_QTY'] = df[rev_qty_col] if rev_qty_col else (df[orig_qty_col] if orig_qty_col else np.nan)
+    df['REVISED QUANTITY'] = df['Final_QTY']
     df['ASSORTMENT ITEM?'] = 'N'
     df['COMPONENT ASSORT QTY'] = np.nan
     return df
