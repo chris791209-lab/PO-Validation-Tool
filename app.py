@@ -57,12 +57,22 @@ def clean_dpci(series):
 # ==========================================
 def process_standard_po(df):
     """處理【標準版】訂單原始資料"""
-    df.columns = df.columns.str.replace('\ufeff', '').str.strip()
-    if 'PO NUMBER' not in df.columns:
-        st.error("❌ 檔案讀取錯誤：找不到 'PO NUMBER' 欄位！請確認您上傳的是【標準版】。")
+    # 清理所有欄位名稱中的隱藏編碼與換行
+    df.columns = df.columns.astype(str).str.replace(r'[\ufeff\n\r]', '', regex=True).str.strip()
+    
+    # 智慧鎖定 PO NUMBER 欄位
+    po_col = next((c for c in df.columns if 'PO NUMBER' in c.upper()), None)
+    
+    if not po_col:
+        # 如果找不到，檢查是不是使用者傳成了現代版
+        if next((c for c in df.columns if 'PO' in c.upper() and '#' in c.upper()), None):
+            st.error("❌ 檔案讀取錯誤：您上傳的似乎是【現代版 PO】。請切換到上方的「📈 現代版 (Modern PO)」分頁進行操作！")
+        else:
+            st.error("❌ 檔案讀取錯誤：找不到 'PO NUMBER' 欄位！請確認您上傳的是正確的【標準版 PO】檔案。")
         st.stop()
         
-    df = df[df['PO NUMBER'].astype(str).str.match(r'^\d+$', na=False)].copy()
+    df = df[df[po_col].astype(str).str.match(r'^\d+$', na=False)].copy()
+    df['PO NUMBER'] = df[po_col] # 統一標準化名稱
     df['ASSORTMENT ITEM?'] = df['ASSORTMENT ITEM?'].fillna('N').astype(str).str.strip().str.upper()
     
     cols_to_clean = ['DEPARTMENT', 'CLASS', 'ITEM', 'COMPONENT DEPARTMENT', 'COMPONENT CLASS', 'COMPONENT ITEM']
@@ -86,26 +96,36 @@ def process_standard_po(df):
 
 def process_modern_po(df):
     """處理【現代版】訂單原始資料"""
-    df.columns = df.columns.str.replace('\ufeff', '').str.strip()
-    if 'PO #' not in df.columns or 'COST $' not in df.columns:
-        st.error("❌ 檔案讀取錯誤：找不到 'PO #' 或 'COST $' 欄位！請確認您上傳的是【現代版】。")
+    # 清理所有欄位名稱中的隱藏編碼與換行
+    df.columns = df.columns.astype(str).str.replace(r'[\ufeff\n\r]', '', regex=True).str.strip()
+    
+    # 智慧鎖定現代版專屬欄位 (允許大小寫差異與多餘空白)
+    po_col = next((c for c in df.columns if 'PO' in c.upper() and '#' in c.upper()), None)
+    cost_col = next((c for c in df.columns if 'COST' in c.upper() and '$' in c.upper()), None)
+    retail_col = next((c for c in df.columns if 'RETAIL' in c.upper() and '$' in c.upper()), None)
+    
+    if not po_col or not cost_col:
+        # 如果找不到，檢查是不是使用者傳成了標準版
+        if next((c for c in df.columns if 'PO NUMBER' in c.upper()), None):
+            st.error("❌ 檔案讀取錯誤：您上傳的似乎是【標準版 PO】。請切換到上方的「📊 標準版 (Standard PO)」分頁進行操作！")
+        else:
+            st.error("❌ 檔案讀取錯誤：找不到 'PO #' 或 'COST $' 欄位！請確認您上傳的是正確的【現代版 PO】檔案。")
         st.stop()
         
-    df = df[df['PO #'].astype(str).str.match(r'^\d+$', na=False)].copy()
+    df = df[df[po_col].astype(str).str.match(r'^\d+$', na=False)].copy()
     
-    # 【新增】將 REVISED QUANTITY 也納入數字清理轉換
-    for col in ['ORIGINAL QUANTITY', 'REVISED QUANTITY', 'COST $', 'RETAIL $', 'VCP QUANTITY']:
-        if col in df.columns:
+    for col in ['ORIGINAL QUANTITY', 'REVISED QUANTITY', cost_col, retail_col, 'VCP QUANTITY']:
+        if col and col in df.columns:
             df[col] = df[col].astype(str).str.replace(',', '', regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
-    df['PO NUMBER'] = df['PO #'].astype(str)
+    df['PO NUMBER'] = df[po_col].astype(str)
     df['Original_DPCI'] = clean_dpci(df['DPCI'])
     df['Final_DPCI'] = df['Original_DPCI']
     df['Final_QTY'] = df['ORIGINAL QUANTITY']
     
-    df['ITEM UNIT COST'] = df['COST $'] / df['ORIGINAL QUANTITY']
-    df['ITEM UNIT RETAIL'] = df['RETAIL $'] / df['ORIGINAL QUANTITY']
+    df['ITEM UNIT COST'] = df[cost_col] / df['ORIGINAL QUANTITY']
+    df['ITEM UNIT RETAIL'] = df[retail_col] / df['ORIGINAL QUANTITY']
     df['ASSORTMENT ITEM?'] = 'N'
     df['COMPONENT ASSORT QTY'] = np.nan
     return df
@@ -121,7 +141,6 @@ def process_products(files):
     if 'DPCI' in master_product_df.columns:
         master_product_df['DPCI'] = clean_dpci(master_product_df['DPCI'])
     
-    # 【新增】將 Ent Ttl Rcpt U 納入數值讀取欄位
     numeric_cols = ['FCA Factory City Unit Cost', 'FOB Unit Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U']
     for col in numeric_cols:
         if col in master_product_df.columns:
@@ -196,7 +215,6 @@ with tab1:
                 po_df = process_standard_po(pd.read_csv(po_file_std))
                 prod_df = process_products(product_files)
                 
-                # 【新增】抓取 Ent Ttl Rcpt U 欄位
                 prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
                 merged_df = pd.merge(po_df, prod_subset, left_on='Final_DPCI', right_on='DPCI', how='left')
 
@@ -220,7 +238,7 @@ with tab1:
                 merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 
-                # 【新增】(4) 總數量比對 (標準版使用 Final_QTY 也就是 TOTAL ITEM QTY/COMPONENT ITEM TOTAL QTY)
+                # (4) 總數量比對
                 merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
                 merged_df['PO Total QTY'] = merged_df['Final_QTY']
                 merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
@@ -260,7 +278,6 @@ with tab2:
                 po_df = process_modern_po(pd.read_csv(po_file_mod))
                 prod_df = process_products(product_files)
                 
-                # 【新增】抓取 Ent Ttl Rcpt U 欄位
                 prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
                 merged_df = pd.merge(po_df, prod_subset, left_on='Final_DPCI', right_on='DPCI', how='left')
 
@@ -289,7 +306,7 @@ with tab2:
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 merged_df['Case QTY Match'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', True, merged_df['Case QTY Match'])
                 
-                # 【新增】(4) 總數量比對 (現代版特別抓取 REVISED QUANTITY 進行比對)
+                # (4) 總數量比對
                 merged_df['Target Total QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
                 merged_df['PO Total QTY'] = merged_df['REVISED QUANTITY']
                 merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Total QTY'].fillna(-1), atol=0.01)
