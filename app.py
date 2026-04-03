@@ -40,7 +40,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 1. 共通 DPCI 清理函數
+# 1. 共通資料清理函數
 # ==========================================
 def clean_dpci(series):
     """清理 DPCI 字串，強制移除所有空白、斜線與隱藏字元"""
@@ -50,6 +50,16 @@ def clean_dpci(series):
     cleaned = cleaned.str.replace(r'\s+', '', regex=True)
     cleaned = cleaned.str.replace(r'[/\\]', '-', regex=True)
     cleaned = cleaned.str.replace(r'\.0$', '', regex=True)
+    return cleaned
+
+def clean_upc(series):
+    """清理 UPC/Barcode 字串，避免因 Excel 浮點數轉換產生 .0 導致比對失敗"""
+    if series is None:
+        return series
+    cleaned = series.astype(str)
+    cleaned = cleaned.str.replace(r'\.0$', '', regex=True) # 移除結尾的 .0
+    cleaned = cleaned.str.replace(r'\s+', '', regex=True) # 移除空白
+    cleaned = cleaned.replace('nan', np.nan) # 將字串 'nan' 轉回真正的空值
     return cleaned
 
 # ==========================================
@@ -91,6 +101,10 @@ def process_standard_po(df):
     
     for col in ['ITEM UNIT COST', 'ITEM UNIT RETAIL', 'VCP QUANTITY', 'COMPONENT ASSORT QTY']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+    # 【新增】抓取標準版的 ITEM BAR CODE
+    df['PO UPC'] = clean_upc(df.get('ITEM BAR CODE', pd.Series(np.nan)))
+        
     return df
 
 def process_modern_po(df):
@@ -143,6 +157,10 @@ def process_modern_po(df):
     df['REVISED QUANTITY'] = df['Final_QTY']
     df['ASSORTMENT ITEM?'] = 'N'
     df['COMPONENT ASSORT QTY'] = np.nan
+    
+    # 【新增】抓取現代版的 UPC
+    df['PO UPC'] = clean_upc(df.get('UPC', pd.Series(np.nan)))
+    
     return df
 
 def process_products(files):
@@ -155,6 +173,13 @@ def process_products(files):
     master_product_df = pd.concat(df_list, ignore_index=True)
     if 'DPCI' in master_product_df.columns:
         master_product_df['DPCI'] = clean_dpci(master_product_df['DPCI'])
+    
+    # 【新增】抓取產品主檔的 Barcode
+    # 若有 Barcode 欄位則抓取，否則嘗試抓取 UPC 欄位
+    if 'Barcode' in master_product_df.columns:
+        master_product_df['Target UPC'] = clean_upc(master_product_df['Barcode'])
+    else:
+        master_product_df['Target UPC'] = clean_upc(master_product_df.get('UPC', pd.Series(np.nan)))
     
     numeric_cols = ['FCA Factory City Unit Cost', 'FOB Unit Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U']
     for col in numeric_cols:
@@ -230,7 +255,8 @@ with tab1:
                 po_df = process_standard_po(pd.read_csv(po_file_std))
                 prod_df = process_products(product_files)
                 
-                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
+                # 加入 Target UPC 欄位
+                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U', 'Target UPC'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
                 merged_df = pd.merge(po_df, prod_subset, left_on='Final_DPCI', right_on='DPCI', how='left')
 
                 if asst_files:
@@ -253,21 +279,27 @@ with tab1:
                 merged_df['Case QTY Match'] = np.isclose(merged_df['PO VCP / Assort QTY'].fillna(-1), merged_df['Target Case / Assort QTY'].fillna(-1), atol=0.01)
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 
-                # (4) 總數量比對 (精準命名)
+                # (4) 總數量比對
                 merged_df['Target Commit QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
                 merged_df['PO Total QTY'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
                 merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Commit QTY'].fillna(-1), atol=0.01)
                 merged_df['Total QTY Match'] = np.where(merged_df['Target Commit QTY'].isna(), False, merged_df['Total QTY Match'])
                 
-                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
+                # 【新增】(5) UPC 條碼比對
+                # 只有當 PO 上有條碼且主檔也有條碼，且兩者完全相等時才為 True
+                merged_df['UPC Match'] = (merged_df['PO UPC'] == merged_df['Target UPC']) & merged_df['Target UPC'].notna() & merged_df['PO UPC'].notna()
                 
-                # 顯示結果
+                # 總覽判定更新，加入 UPC Match
+                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match'] & merged_df['UPC Match']
+                
+                # 顯示結果 (加入 UPC 相關欄位)
                 display_cols = [
                     'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 'Final_QTY', 
                     'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
                     'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
                     'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
                     'Total QTY Match', 'PO Total QTY', 'Target Commit QTY',
+                    'UPC Match', 'PO UPC', 'Target UPC',
                     'All Match (Pass)'
                 ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
@@ -293,7 +325,7 @@ with tab2:
                 po_df = process_modern_po(pd.read_csv(po_file_mod))
                 prod_df = process_products(product_files)
                 
-                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
+                prod_subset = prod_df[[c for c in ['DPCI', 'Final_Product_Cost', 'Suggested Unit Retail', 'Case Unit Quantity', 'Ent Ttl Rcpt U', 'Target UPC'] if c in prod_df.columns]].drop_duplicates(subset=['DPCI'])
                 merged_df = pd.merge(po_df, prod_subset, left_on='Final_DPCI', right_on='DPCI', how='left')
 
                 if asst_files:
@@ -321,21 +353,26 @@ with tab2:
                 merged_df['Case QTY Match'] = np.where(merged_df['Target Case / Assort QTY'].isna(), False, merged_df['Case QTY Match'])
                 merged_df['Case QTY Match'] = np.where(merged_df['ASSORTMENT ITEM?'] == 'Y', True, merged_df['Case QTY Match'])
                 
-                # (4) 總數量比對 (精準命名)
+                # (4) 總數量比對
                 merged_df['Target Commit QTY'] = merged_df.get('Ent Ttl Rcpt U', pd.Series(np.nan))
                 merged_df['PO Total QTY'] = merged_df.groupby('Final_DPCI')['Final_QTY'].transform('sum')
                 merged_df['Total QTY Match'] = np.isclose(merged_df['PO Total QTY'].fillna(-1), merged_df['Target Commit QTY'].fillna(-1), atol=0.01)
                 merged_df['Total QTY Match'] = np.where(merged_df['Target Commit QTY'].isna(), False, merged_df['Total QTY Match'])
                 
-                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match']
+                # 【新增】(5) UPC 條碼比對
+                merged_df['UPC Match'] = (merged_df['PO UPC'] == merged_df['Target UPC']) & merged_df['Target UPC'].notna() & merged_df['PO UPC'].notna()
                 
-                # 顯示結果
+                # 總覽判定更新
+                merged_df['All Match (Pass)'] = merged_df['Cost Match'] & merged_df['Retail Match'] & merged_df['Case QTY Match'] & merged_df['Total QTY Match'] & merged_df['UPC Match']
+                
+                # 顯示結果 (加入 UPC 相關欄位)
                 display_cols = [
                     'PO NUMBER', 'ASSORTMENT ITEM?', 'Original_DPCI', 'Final_DPCI', 'ITEM DESCRIPTION', 'Final_QTY',
                     'Cost Match', 'ITEM UNIT COST', 'Target_Cost', 
                     'Retail Match', 'ITEM UNIT RETAIL', 'Suggested Unit Retail', 
                     'Case QTY Match', 'PO VCP / Assort QTY', 'Target Case / Assort QTY', 
                     'Total QTY Match', 'PO Total QTY', 'Target Commit QTY',
+                    'UPC Match', 'PO UPC', 'Target UPC',
                     'All Match (Pass)'
                 ]
                 result_df = merged_df[[c for c in display_cols if c in merged_df.columns]]
