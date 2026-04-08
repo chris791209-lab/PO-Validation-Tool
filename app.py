@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import re  # ★ 新增：用於方法二的 list comprehension
 
 # ==========================================
 # 0. 密碼保護機制
@@ -52,7 +53,8 @@ def clean_upc(series):
 # 2. 定義資料處理函數 (模組化)
 # ==========================================
 def process_standard_po(df):
-    df.columns = df.columns.astype(str).str.replace(r'[\ufeff\n\r]', '', regex=True).str.strip()
+    # ★ 修正：改用 list comprehension 取代 PyArrow 不相容的 str.replace
+    df.columns = [re.sub(r'[\ufeff\n\r]', '', str(col)).strip() for col in df.columns]
     po_col = next((c for c in df.columns if 'PO NUMBER' in c.upper()), None)
     if not po_col:
         if next((c for c in df.columns if 'PO' in c.upper() and '#' in c.upper()), None):
@@ -86,7 +88,8 @@ def process_standard_po(df):
     return df
 
 def process_modern_po(df):
-    df.columns = df.columns.astype(str).str.replace(r'[\ufeff\n\r]', '', regex=True).str.strip()
+    # ★ 修正：改用 list comprehension 取代 PyArrow 不相容的 str.replace
+    df.columns = [re.sub(r'[\ufeff\n\r]', '', str(col)).strip() for col in df.columns]
     po_col = next((c for c in df.columns if 'PO' in c.upper() and '#' in c.upper()), None)
     cost_col = (next((c for c in df.columns if c.upper() == 'COST $'), None) or
                 next((c for c in df.columns if 'REV COST' in c.upper() and '$' in c.upper()), None) or
@@ -162,7 +165,8 @@ def process_assortments(files):
             if header_idx == -1:
                 continue
             df = raw_df.iloc[header_idx + 1:].reset_index(drop=True)
-            df.columns = raw_df.iloc[header_idx].astype(str).str.replace(r'[\n\r]', ' ', regex=True).str.strip()
+            # ★ 修正：改用 list comprehension 取代 PyArrow 不相容的 str.replace
+            df.columns = [re.sub(r'[\n\r]', ' ', str(col)).strip() for col in raw_df.iloc[header_idx]]
             cols = {
                 'master': next((c for c in df.columns if 'assortment dpci' in c.lower()), None),
                 'sub':    next((c for c in df.columns if 'component item dpci' in c.lower() or 'item dpci' in c.lower()), None),
